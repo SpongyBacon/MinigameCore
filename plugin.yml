@@ -1,0 +1,13 @@
+name: MinigameCore
+version: 0.1.1
+main: com.codebeasts.minigamecore.MinigameCore
+authors: [SpongyBacon, Codebeasts.com]
+description: A minigame API by SpongyBacon from http://codebeasts.com [0.1.1 First test version]
+softdepend: [EchoPet, Vault, PingAPI]
+commands:
+  minigamecore:
+    usage: /minigamecore
+    description: Main command
+  core:
+    usage: /core
+    description: Alias for /minigamecore
