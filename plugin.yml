@@ -11,3 +11,245 @@ commands:
   core:
     usage: /core
     description: Alias for /minigamecore
+permissions:
+  package me.konsolas.aac.detectors.movement;
+
+import java.util.*;
+
+import com.comphenix.protocol.PacketType;
+import com.comphenix.protocol.ProtocolLibrary;
+import com.comphenix.protocol.events.PacketContainer;
+import me.konsolas.aac.AAC;
+import me.konsolas.aac.api.HackType;
+import me.konsolas.aac.detectors.DamageListener;
+import me.konsolas.aac.detectors.Detector;
+import me.konsolas.aac.detectors.MoveListener;
+import me.konsolas.aac.util.Ping;
+import me.konsolas.aac.util.general.GroundUtil;
+import me.konsolas.aac.util.general.NumberUtil;
+
+import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
+import org.bukkit.Material;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+
+public class NoFall extends Detector implements MoveListener{
+	private Set<UUID> falling = new HashSet<>();
+	private Map<UUID, Float> shouldfall = new HashMap<>();
+	private Map<UUID, Double> previousy = new HashMap<>();
+	private Map<UUID, Float> calculateLater = new HashMap<>();
+
+	private boolean DEAL_DAMAGE = true;
+	private boolean REDUCED_CHECK = true;
+	private long TICKS_TO_CHECK = 6;
+	
+	public NoFall(AAC p) {
+		super(p);
+
+		DEAL_DAMAGE = plugin.getConfig().getBoolean("nofall.deal_damage", DEAL_DAMAGE);
+		REDUCED_CHECK = plugin.getConfig().getBoolean("nofall.reduced_check", REDUCED_CHECK);
+		TICKS_TO_CHECK = plugin.getConfig().getLong("nofall.ticks_to_check", TICKS_TO_CHECK);
+	}
+
+	public void onPlayerMove(final PlayerMoveEvent e) {
+		if(e.getPlayer().hasPermission("AAC.bypass") || e.getPlayer().getGameMode().equals(GameMode.CREATIVE) || e.getPlayer().getGameMode().equals(GameMode.SPECTATOR) || e.getPlayer().isFlying() || e.getPlayer().getAllowFlight() || e.getPlayer().getVehicle() != null) {
+			falling.remove(e.getPlayer().getUniqueId());
+			shouldfall.remove(e.getPlayer().getUniqueId());
+			previousy.put(e.getPlayer().getUniqueId(), e.getTo().getY());
+			return;
+		}
+
+		// If the player is falling
+		if(falling.contains(e.getPlayer().getUniqueId())) {
+			// If the player falls on water
+			if(e.getPlayer().getLocation().getBlock().isLiquid() || e.getPlayer().getLocation().add(0,1,0).getBlock().isLiquid() || e.getPlayer().getLocation().subtract(0,1,0).getBlock().isLiquid() || e.getPlayer().getLocation().add(0,2,0).getBlock().isLiquid()) {
+				// Cancel all nofall values
+				falling.remove(e.getPlayer().getUniqueId());
+				shouldfall.remove(e.getPlayer().getUniqueId());
+				previousy.put(e.getPlayer().getUniqueId(), e.getTo().getY());
+			}
+
+			// If the player falls on a web
+			if(e.getPlayer().getLocation().add(0,0.7,0).getBlock().getType().equals(Material.WEB) || e.getPlayer().getLocation().add(0,1.7,0).getBlock().getType().equals(Material.WEB)) {
+				// Cancel all nofall values
+				falling.remove(e.getPlayer().getUniqueId());
+				shouldfall.remove(e.getPlayer().getUniqueId());
+				previousy.put(e.getPlayer().getUniqueId(), e.getTo().getY());
+			}
+
+			// If the player ended up higher than previously
+			if(e.getPlayer().getLocation().getY() > previousy.get(e.getPlayer().getUniqueId())) {
+				// Update the fall height
+				previousy.put(e.getPlayer().getUniqueId(), e.getPlayer().getLocation().getY());
+			}
+
+			// When the player lands
+			if(GroundUtil.isOnGround(e.getPlayer())) {
+				// He's no longer falling
+				falling.remove(e.getPlayer().getUniqueId());
+
+				// If the player should take fall damage
+				if(estimateDamage(previousy.get(e.getPlayer().getUniqueId()), e.getPlayer().getLocation().getY()) > 1) {
+					// If the player lands on a slime block, no fall damage should be taken
+					if(e.getPlayer().getLocation().subtract(0,0.8,0).getBlock().getType().equals(Material.SLIME_BLOCK) || e.getPlayer().getLocation().subtract(0,1.8,0).getBlock().getType().equals(Material.SLIME_BLOCK)) {
+						return;
+					}
+
+					plugin.log.debug(e.getPlayer(), "(NoFall) PlayerMoveEvent damage[e:" + estimateDamage(previousy.get(e.getPlayer().getUniqueId()), e.getPlayer().getLocation().getY()) + "]");
+
+					// The player should now take fall damage, activate the fall damage listener
+					shouldfall.put(e.getPlayer().getUniqueId(), estimateDamage(previousy.get(e.getPlayer().getUniqueId()), e.getPlayer().getLocation().getY()));
+
+					final UUID u = e.getPlayer().getUniqueId();
+					// Wait for fall damage
+					Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
+						@Override
+						public void run() {
+                            // If the damage listener hasn't been called
+							if(shouldfall.containsKey(u) && !calculateLater.containsKey(u)) {
+								final Player p = Bukkit.getPlayer(u);
+								if(GroundUtil.noFallAllowNoFall(p)) {
+									falling.remove(e.getPlayer().getUniqueId());
+									shouldfall.remove(e.getPlayer().getUniqueId());
+									previousy.put(e.getPlayer().getUniqueId(), e.getTo().getY());
+									return;
+								}
+								if(add(p.getUniqueId(), 1, HackType.NOFALL, p.getName() + " failed NoFall: Tried to avoid fall damage (" + (shouldfall.get(p.getUniqueId()) + 3.0) + " blocks)")) {
+									if(DEAL_DAMAGE) {
+										// Using deprecated method to check for client faking
+										if(p.isOnGround()) {
+											p.setFallDistance(shouldfall.get(p.getUniqueId()) + 3);
+										} else {
+                                            final PacketContainer fakeOnGround = ProtocolLibrary.getProtocolManager().createPacket(PacketType.Play.Client.FLYING);
+											fakeOnGround.getBooleans().write(0, true);
+											p.setFallDistance(shouldfall.get(p.getUniqueId()) + 3);
+											Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
+												@Override
+												public void run() {
+													try {
+														ProtocolLibrary.getProtocolManager().recieveClientPacket(p, fakeOnGround, false);
+													} catch(Exception ex) {
+														plugin.log.log("(NoFall) Failed to deal fall damage to player: " + ex.getMessage());
+													}
+												}
+											}, 1);
+										}
+									}
+								}
+								shouldfall.remove(u);
+							}
+						}
+					}, TICKS_TO_CHECK);
+				}
+			}
+		} else {
+			if(!GroundUtil.isOnGround(e.getPlayer())) {
+				previousy.put(e.getPlayer().getUniqueId(), e.getPlayer().getLocation().getY());
+				falling.add(e.getPlayer().getUniqueId());
+			}
+		}
+	}
+	
+	@EventHandler
+	public void onPlayerTeleport(PlayerTeleportEvent e) {
+		if(e.getCause() != PlayerTeleportEvent.TeleportCause.SPECTATE) {
+			falling.remove(e.getPlayer().getUniqueId());
+			shouldfall.remove(e.getPlayer().getUniqueId());
+			previousy.put(e.getPlayer().getUniqueId(), e.getTo().getY());
+		}
+	}
+	
+	@EventHandler
+	public void onPlayerRespawn(final PlayerRespawnEvent e) {
+		Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
+			@Override
+			public void run() {
+				falling.remove(e.getPlayer().getUniqueId());
+				shouldfall.remove(e.getPlayer().getUniqueId());
+				previousy.put(e.getPlayer().getUniqueId(), e.getRespawnLocation().getY());
+			}
+		}, 1);
+	}
+
+	@EventHandler
+	public void onBlockBreak(BlockBreakEvent e) {
+		falling.remove(e.getPlayer().getUniqueId());
+		shouldfall.remove(e.getPlayer().getUniqueId());
+		previousy.put(e.getPlayer().getUniqueId(), e.getPlayer().getLocation().getY());
+	}
+	
+	@EventHandler(ignoreCancelled = false, priority = EventPriority.LOWEST)
+	public void onEntityDamage(final EntityDamageEvent e) {
+		if(e.getEntity().hasPermission("AAC.bypass"))
+			return;
+
+		// If it was fall damage
+		if(e.getCause().equals(DamageCause.FALL) && e.getEntity().getType() == EntityType.PLAYER) {
+			// If this fall damage was expected
+			if(shouldfall.containsKey(e.getEntity().getUniqueId())) {
+				plugin.log.debug((Player) e.getEntity(), "(NoFall) EntityDamageEvent damage[e:" + shouldfall.get(e.getEntity().getUniqueId()) + ",r:" + e.getDamage() + "]");
+				// If the correct amount of fall damage was taken
+				if(NumberUtil.roughlyEquals(e.getDamage(), shouldfall.get(e.getEntity().getUniqueId()), 1)) {
+					shouldfall.remove(e.getEntity().getUniqueId());
+					sub(e.getEntity().getUniqueId(), 1);
+				}
+				// If the player took less damage :o
+				else if(e.getDamage() < shouldfall.get(e.getEntity().getUniqueId())) {
+					// If the reduced damage check is enabled
+					if(!REDUCED_CHECK) {
+						return;
+					}
+					Player p = (Player) e.getEntity();
+					if(GroundUtil.noFallAllowNoFall(p))
+						return;
+					if(add(p.getUniqueId(), 1, HackType.NOFALL, p.getName() + " failed NoFall: Tried to take reduced fall damage (" + shouldfall.get(p.getUniqueId()) + " blocks) (" + e.getDamage() + " damage)")) {
+						if(DEAL_DAMAGE) {
+							p.setFallDistance(shouldfall.get(p.getUniqueId()) + 1);
+						}
+					}
+					shouldfall.remove(p.getUniqueId());
+				} else {
+					shouldfall.remove(e.getEntity().getUniqueId());
+					sub(e.getEntity().getUniqueId(), 1);
+				}
+            } else {
+                if (GroundUtil.isOnGround((Player) e.getEntity())) {
+					falling.remove(e.getEntity().getUniqueId());
+                    previousy.put(e.getEntity().getUniqueId(), e.getEntity().getLocation().getY());
+				} else {
+					calculateLater.put(e.getEntity().getUniqueId(), estimateDamage(previousy.get(e.getEntity().getUniqueId()), e.getEntity().getLocation().getY()));
+					Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
+						@Override
+					public void run() {
+							calculateLater.remove(e.getEntity().getUniqueId());
+						}
+					}, TICKS_TO_CHECK * 2);
+
+                    Bukkit.getServer().getScheduler().scheduleSyncDelayedTask(plugin, new Runnable() {
+                        @Override
+                    public void run() {
+                            onPlayerMove(new PlayerMoveEvent((Player) e.getEntity(), e.getEntity().getLocation(), e.getEntity().getLocation()));
+                        }
+                    }, 2);
+				}
+			}
+        } else {
+            if (previousy.containsKey(e.getEntity().getUniqueId())) {
+                previousy.put(e.getEntity().getUniqueId(), e.getEntity().getLocation().getY());
+			}
+		}
+	}
+	
+	private float estimateDamage(double prevy, double curry) {
+		return (float) (prevy - curry - 3);
+	}
+}
